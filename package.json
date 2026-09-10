@@ -1,0 +1,20 @@
+{
+  "name": "codex-zh",
+  "version": "0.1.0",
+  "description": "A translation bridge for the native Codex terminal UI, using DeepSeek Responses API.",
+  "type": "module",
+  "private": true,
+  "bin": { "codex-zh": "bin/codex-zh.mjs" },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node bin/codex-zh.mjs",
+    "install:local": "node scripts/install-local.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:live": "node scripts/verify-deepseek.mjs",
+    "test:native": "node scripts/verify-native.mjs",
+    "test:tui": "node scripts/verify-tui.mjs",
+    "check": "node scripts/check.mjs"
+  },
+  "dependencies": { "ws": "8.21.3" },
+  "license": "UNLICENSED"
+}
