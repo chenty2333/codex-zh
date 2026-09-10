@@ -5,7 +5,7 @@ export async function fixture(t, overrides = {}) {
   const base = resolve('.test-state'); await mkdir(base, { recursive: true });
   const directory = await mkdtemp(join(base, 'unit-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const config = { model: 'deepseek-flash', baseURL: 'https://api.deepseek.com', apiKey: 'test-credential', timeoutMs: 3000, batchChars: 1800, passthrough: false, maxTextChars: 128 * 1024, maxBufferedChars: 4 * 1024 * 1024, maxLiveItems: 256, ...overrides };
+  const config = { model: 'deepseek-flash', baseURL: 'https://api.deepseek.com', apiKey: 'test-credential', timeoutMs: 3000, passthrough: false, maxTextChars: 128 * 1024, maxBufferedChars: 4 * 1024 * 1024, maxLiveItems: 256, ...overrides };
   return { directory, config };
 }
 
@@ -17,9 +17,9 @@ export const deferred = () => {
 
 export function fakeAPI(transform = s => s.replaceAll('Hello', '你好').replaceAll('World', '世界').replaceAll('你好', 'Hello')) {
   const calls = [];
-  return { calls, async translate(records, direction, { signal } = {}) {
-    signal?.throwIfAborted(); calls.push({ records: structuredClone(records), direction });
-    return records.map(r => transform(r.masked, direction));
+  return { calls, async translate(text, direction, { signal } = {}) {
+    signal?.throwIfAborted(); calls.push({ text, direction });
+    return transform(text, direction);
   } };
 }
 

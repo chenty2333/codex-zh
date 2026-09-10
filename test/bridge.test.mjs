@@ -39,6 +39,21 @@ test('only prompt text changes; attachments, skills, model settings, and origina
   assert.deepEqual(down.at(-1).params.item.content, original.params.input);
 });
 
+test('whole input and raw returned text reach the backend with source annotations kept only in the echo', async t => {
+  const source = '请修改 @文件.ts。\n\n```js\nconst label = "提交";\n```\n' + '保留完整上下文。'.repeat(300);
+  const translated = '# Translation\n\nEdit the file.\n\n```js\nconst label = "Submit";\n```\nAdded 123.\n';
+  const { bridge, up, down, api } = await setup(t, fakeAPI(() => translated));
+  const original = prompt();
+  original.params.input[0] = { type: 'text', text: source, text_elements: [{ byteRange: { start: Buffer.byteLength('请修改 '), end: Buffer.byteLength('请修改 @文件.ts') }, placeholder: '@文件.ts' }] };
+  await bridge.fromClient(original);
+  assert.deepEqual(api.calls, [{ text: source, direction: 'en' }]);
+  assert.equal(up[0].params.input[0].text, translated);
+  assert.deepEqual(up[0].params.input[0].text_elements, []);
+  assert.deepEqual(up[0].params.input.slice(1), original.params.input.slice(1));
+  await bridge.fromServer(event('item/completed', { item: { type: 'userMessage', id: 'user', clientId: up[0].params.clientUserMessageId, content: up[0].params.input } }));
+  assert.deepEqual(down.at(-1).params.item.content, original.params.input);
+});
+
 test('failed input translation is never submitted', async t => {
   const api = { async translate() { throw new Error('Failure'); } };
   const { bridge, up, down } = await setup(t, api);
@@ -67,12 +82,12 @@ test('authoritative source wins over different source deltas; displayed chunks e
   assert.equal(displayed, '你好\n世界');
   assert.equal(down.find(m => m.method === 'item/completed').params.item.text, displayed);
   assert.equal(down.find(m => m.method === 'turn/completed').params.turn.items[0].text, displayed);
-  assert.equal(api.calls.length, 1);
+  assert.deepEqual(api.calls, [{ text: 'Hello\nWorld', direction: 'zh' }]);
 });
 
 test('approvals, tool output, and interrupt bypass a slow translation; remainder is preserved', async t => {
   const entered = deferred();
-  const api = { async translate(_records, _direction, { signal }) {
+  const api = { async translate(_text, _direction, { signal }) {
     entered.resolve(); return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true }));
   } };
   const { bridge, up, down } = await setup(t, api);
@@ -101,14 +116,26 @@ test('interrupt cancels a prompt still waiting for translation', async t => {
   assert.ok(down.some(m => m.id === 1 && m.error));
 });
 
-test('output validation failure preserves source for that batch and keeps the displayed prefix consistent', async t => {
-  let count = 0;
-  const api = { async translate(records) { count++; return records.map(r => count === 1 ? r.masked.replace('Hello', '你好') : 'bad `injected code`'); } };
-  const { bridge, down } = await setup(t, api, { batchChars: 1 });
-  await bridge.fromServer(start()); await bridge.fromServer(finish('Hello\nWorld'));
-  const displayed = down.filter(m => m.method.endsWith('/delta')).map(m => m.params.delta).join('');
-  assert.equal(displayed, '你好\nWorld'); assert.equal(down.at(-1).params.item.text, displayed);
-  assert.ok(down.some(m => m.method === 'warning'));
+test('fallback warnings identify the failure without leaking response text or credentials', async t => {
+  const privateText = 'private response body and Bearer test-credential';
+  const cases = [
+    [new Error('DeepSeek Responses API returned HTTP 429'), '翻译接口返回 HTTP 429'],
+    [new Error('DeepSeek translation timed out'), '翻译请求超时'],
+    [new TypeError('fetch failed', { cause: new Error(privateText) }), '翻译网络请求失败'],
+    [new SyntaxError(privateText), '未识别的翻译错误'],
+    [new Error(`DeepSeek Responses API returned HTTP 500\n${privateText}`), '未识别的翻译错误'],
+  ];
+  for (const [error, reason] of cases) {
+    const api = { async translate() { throw error; } };
+    const { bridge, down } = await setup(t, api);
+    await bridge.fromServer(start()); await bridge.fromServer(finish('Hello'));
+    const warnings = down.filter(m => m.method === 'warning');
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].params.message, `回复翻译失败（${reason}）；本条回复保留原文。`);
+    assert.equal(down.filter(m => m.method.endsWith('/delta')).map(m => m.params.delta).join(''), 'Hello');
+    assert.equal(down.at(-1).params.item.text, 'Hello');
+    assert.ok(!JSON.stringify(down).includes(privateText));
+  }
 });
 
 test('resume, fork, and all history reads retain original text without translation or disk writes', async t => {
@@ -172,31 +199,11 @@ test('input text exists only through its live echo and final turn snapshot', asy
   assert.equal(down.at(-1).result.thread.turns[0].items[0].content[0].text, 'Hello `file.ts`');
 });
 
-test('cancellation after a committed prefix preserves that prefix and the complete original tail', async t => {
-  const entered = deferred(); let calls = 0;
-  const api = { async translate(records, _dir, { signal }) {
-    if (++calls === 1) return records.map(r => r.masked.replace('Hello', '你好'));
-    entered.resolve();
-    return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true }));
-  } };
-  const { bridge, down } = await setup(t, api, { batchChars: 1 });
-  await bridge.fromServer(start());
-  bridge.fromServer(finish('Hello\nWorld\nKeep this tail.'));
-  await entered.promise;
-  await bridge.fromClient({ id: 2, method: 'turn/interrupt', params: { threadId: 'thread', turnId: 'turn' } });
-  await bridge.idle();
-  await bridge.fromServer(done('Hello\nWorld\nKeep this tail.', 'interrupted'));
-  const displayed = down.filter(m => m.method.endsWith('/delta')).map(m => m.params.delta).join('');
-  assert.equal(displayed, '你好\nWorld\nKeep this tail.');
-  assert.equal(down.find(m => m.method === 'item/completed').params.item.text, displayed);
-  assert.equal(down.find(m => m.method === 'turn/completed').params.turn.items[0].text, displayed);
-});
-
 test('one thousand completed turns retain no history, pending inputs, controllers, or queue entries', async t => {
   let calls = 0;
-  const api = { async translate(records, dir) {
+  const api = { async translate(text, dir) {
     calls++;
-    return records.map(r => dir === 'en' ? r.masked.replaceAll('你好', 'Hello') : r.masked.replaceAll('Hello', '你好'));
+    return dir === 'en' ? text.replaceAll('你好', 'Hello') : text.replaceAll('Hello', '你好');
   } };
   const { bridge, up, down, directory } = await setup(t, api);
   for (let i = 0; i < 1000; i++) {
@@ -255,16 +262,15 @@ test('an oversized authoritative item is displayed whole without invoking transl
   assert.equal(api.calls.length, 0); assert.equal(bridge.retainedItems, 0);
 });
 
-test('translation expansion cannot exceed its reservation or discard an uncommitted source tail', async t => {
-  let calls = 0;
-  const api = { async translate(records) { return records.map(() => ++calls === 1 ? '你'.repeat(40) : '界'.repeat(100)); } };
-  const { bridge, down } = await setup(t, api, { maxTextChars: 16, maxBufferedChars: 64, batchChars: 1 });
-  await bridge.fromServer(start()); await bridge.fromServer(finish('Hello\nWorld'));
-  const displayed = down.filter(m => m.method.endsWith('/delta')).map(m => m.params.delta).join('');
-  assert.equal(displayed, `${'你'.repeat(40)}\nWorld`);
-  assert.equal(down.at(-1).params.item.text, displayed);
-  assert.ok(bridge.retainedChars <= 48);
-  await bridge.fromServer(done('Hello\nWorld'));
+test('large returned translations are displayed intact and accounted for until the turn ends', async t => {
+  const translated = '译文'.repeat(100);
+  const { bridge, down } = await setup(t, fakeAPI(() => translated), { maxTextChars: 16, maxBufferedChars: 64 });
+  await bridge.fromServer(start()); await bridge.fromServer(finish('Hello'));
+  assert.equal(down.find(m => m.method === 'item/agentMessage/delta').params.delta, translated);
+  assert.equal(down.at(-1).params.item.text, translated);
+  assert.equal(bridge.retainedChars, translated.length);
+  assert.ok(!down.some(m => m.method === 'warning'));
+  await bridge.fromServer(done('Hello'));
   assert.equal(bridge.retainedChars, 0);
 });
 

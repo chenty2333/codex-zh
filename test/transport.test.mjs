@@ -46,7 +46,7 @@ test('slow translation bounds queued native frames and then drains a long burst 
   const { config } = await fixture(t, { maxLiveItems: 1, maxTextChars: 128, maxBufferedChars: 512 });
   const entered = deferred(), release = deferred(), finished = deferred();
   t.after(() => release.resolve());
-  const api = { async translate(records) { entered.resolve(); await release.promise; return records.map(r => r.masked.replaceAll('Hello', '你好')); } };
+  const api = { async translate(text) { entered.resolve(); await release.promise; return text.replaceAll('Hello', '你好'); } };
   const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, killed: false,
     kill() { this.killed = true; this.exitCode = 0; this.stdout.end(); this.stderr.end(); this.emit('exit', 0); return true; },

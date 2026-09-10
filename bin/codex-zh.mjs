@@ -24,7 +24,7 @@ const HELP = `codex-zh — 原生 Codex TUI 的中英翻译代理
 翻译模型：DeepSeek-V4.1-Flash（API 名：deepseek-flash），/responses。
 原生 Codex 的模型和配置继续由 Codex 管理。
 密钥：DEEPSEEK_API_KEY 或系统钥匙环 service=codex-zh credential=deepseek-api-key。
-详细行为、内容保护和兼容边界见项目 README.md。
+详细翻译行为和兼容边界见项目 README.md。
 `;
 
 async function main() {

@@ -15,9 +15,8 @@ const http = createServer(async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
   if (req.url === '/responses') {
     translatorCalls++;
-    const input = JSON.parse(value.input);
-    const translated = { translations: input.segments.map(s => ({ id: s.id, text: input.target_language === 'English' ? s.text.replaceAll('请测试翻译桥接。', 'Please test the translation bridge.') : s.text.replaceAll('The bridge is ready.', '桥接已就绪。') })) };
-    res.end(sse(JSON.stringify(translated))); return;
+    const translated = value.instructions.includes('into English') ? value.input.replaceAll('请测试翻译桥接。', 'Please test the translation bridge.') : value.input.replaceAll('The bridge is ready.', '桥接已就绪。');
+    res.end(sse(translated)); return;
   }
   translatedInputSeen ||= JSON.stringify(value.input).includes('Please test the translation bridge.');
   const response = completedResponse('The bridge is ready.');

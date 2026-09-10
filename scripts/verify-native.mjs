@@ -34,9 +34,9 @@ const modelServer = createServer(async (req, res) => {
 await new Promise(resolve => modelServer.listen(0, '127.0.0.1', resolve));
 const stateDir = new URL('../.test-state/native/', import.meta.url).pathname;
 await mkdir(stateDir, { recursive: true, mode: 0o700 });
-const config = { codexBin: process.env.CODEX_ZH_CODEX_BIN || 'codex', model: 'deepseek-flash', baseURL: 'https://api.deepseek.com', batchChars: 1800, passthrough: false };
+const config = { codexBin: process.env.CODEX_ZH_CODEX_BIN || 'codex', model: 'deepseek-flash', baseURL: 'https://api.deepseek.com', passthrough: false };
 let translationCalls = 0;
-const api = { async translate(records, direction) { translationCalls++; return records.map(r => direction === 'en' ? r.masked.replaceAll('请测试翻译桥接。', 'Please test the translation bridge.') : r.masked.replaceAll('The bridge is ready.', '翻译桥接已就绪。')); } };
+const api = { async translate(text, direction) { translationCalls++; return direction === 'en' ? text.replaceAll('请测试翻译桥接。', 'Please test the translation bridge.') : text.replaceAll('The bridge is ready.', '翻译桥接已就绪。'); } };
 const translator = new Translator(api, config);
 const upstreamURL = `http://127.0.0.1:${modelServer.address().port}/v1`;
 const backendArgs = [

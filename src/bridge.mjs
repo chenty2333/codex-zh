@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { translationFailureReason } from './diagnostics.mjs';
 
 const INPUT_METHODS = new Set(['turn/start', 'turn/steer']);
 const TEXT_TYPES = new Set(['agentMessage', 'plan']);
@@ -47,16 +48,15 @@ export class Bridge {
     this.warning(threadId, '本轮翻译缓冲达到上限；超限的回复按原生方式显示原文。');
   }
   reserve(record) {
-    // One source plus at most three source-limit units of translated/fallback
-    // output. Reserve before accepting work, so concurrent items cannot overbook.
+    // Reserve working space before accepting a request. Once it finishes,
+    // account for the actual retained text without limiting the translation.
     const chars = 4 * this.maxTextChars;
     if (this.retainedItems >= this.maxLiveItems || this.retainedChars + chars > this.maxBufferedChars) return false;
     record.reservation = chars; this.retainedChars += chars; this.retainedItems++;
     return true;
   }
-  shrink(record, chars) {
+  resize(record, chars) {
     if (record.reservation === undefined) return;
-    if (chars > record.reservation) throw new Error('Translation memory reservation exceeded');
     this.retainedChars -= record.reservation - chars; record.reservation = chars;
   }
   release(record) {
@@ -116,31 +116,25 @@ export class Bridge {
       try {
         control.controller.signal.throwIfAborted();
         const outgoing = clone(message);
-        let translatedChars = 0;
-        let remainingChars = outgoing.params.input.reduce((sum, part) => sum + (part.type === 'text' && typeof part.text === 'string' ? part.text.length : 0), 0);
         for (const part of outgoing.params.input) {
           if (part.type !== 'text' || typeof part.text !== 'string') continue;
-          remainingChars -= part.text.length;
-          const translated = await this.translator.translate(part.text, 'en', {
-            elements: part.text_elements || [], signal: control.controller.signal,
-            maxOutputChars: 3 * this.maxTextChars - translatedChars - remainingChars,
-          });
-          part.text = translated.text;
-          translatedChars += translated.text.length;
-          if ('text_elements' in part || translated.textElements.length) part.text_elements = translated.textElements;
+          part.text = await this.translator.translate(part.text, 'en', { signal: control.controller.signal });
+          // Original byte offsets describe the source, not the translated text.
+          // The original annotations remain available in the live input echo.
+          if ('text_elements' in part) part.text_elements = [];
         }
         control.controller.signal.throwIfAborted();
         outgoing.params.clientUserMessageId = record.clientId;
         record.translatedDigest = inputDigest(outgoing.params.input);
         this.inputRequests.set(message.id, record);
-        this.shrink(record, originalChars);
+        this.resize(record, originalChars);
         // A missing acknowledgement must not keep a submitted prompt forever.
         // Acknowledged prompts live only until their turn completes/unsubscribes.
         record.timer = setTimeout(() => this.dropInput(record), 60000); record.timer.unref();
         this.sendUp(outgoing);
       } catch (error) {
         this.dropInput(record);
-        this.inputError(message.id, control.controller.signal.aborted ? '翻译已取消，原始消息未提交。' : '翻译失败或完整性校验未通过，原始消息未提交。请重试，或使用 codex-zh --passthrough。');
+        this.inputError(message.id, control.controller.signal.aborted ? '翻译已取消，原始消息未提交。' : '翻译请求失败，原始消息未提交。请重试，或使用 codex-zh --passthrough。');
         this.log(`Input translation stopped (${error.name || 'Error'}).`);
       } finally { this.controllers.delete(control); }
     });
@@ -182,7 +176,7 @@ export class Bridge {
       if (typeof params.delta !== 'string') return Promise.resolve();
       if (state.source.length + params.delta.length > this.maxTextChars) {
         const prefix = state.source; state.source = ''; state.raw = true;
-        this.shrink(state, 0); this.capacityWarning(threadId);
+        this.resize(state, 0); this.capacityWarning(threadId);
         return this.queue(this.outputQueues, threadId, () => {
           if (prefix) this.down({ method: message.method, params: { ...params, delta: prefix } });
           this.down(message);
@@ -227,11 +221,6 @@ export class Bridge {
     const source = typeof item.text === 'string' ? item.text : state.source;
     if (state.done) { item.text = state.emitted; this.down(outgoing); return; }
     const deltaMethod = state.type === 'plan' ? 'item/plan/delta' : 'item/agentMessage/delta';
-    const emit = chunk => {
-      if (!chunk || state.abandoned || this.closed) return;
-      state.emitted += chunk;
-      this.down({ method: deltaMethod, params: { threadId: state.threadId, turnId: state.turnId, itemId: state.itemId, delta: chunk } });
-    };
     if (source.length > this.maxTextChars) {
       this.capacityWarning(state.threadId);
       // Only the authoritative original is displayed when no source delta escaped.
@@ -240,25 +229,18 @@ export class Bridge {
     }
     const control = this.controller(state.threadId);
     if (state.interrupted) control.controller.abort();
-    let warned = false, consumedSource = 0;
+    let text;
     try {
-      const result = await this.translator.translate(source, 'zh', {
-        signal: control.controller.signal, fallback: true, maxOutputChars: 3 * this.maxTextChars,
-        onChunk: (chunk, meta) => { if (meta) consumedSource += meta.sourceLength; emit(chunk); },
-        onFallback: () => {
-          if (!warned && !state.interrupted) this.warning(state.threadId, '回复翻译未通过校验或暂时不可用；未提交的部分保留原文。');
-          warned = true;
-        },
-      });
-      if (!state.abandoned && !this.closed && result.text !== state.emitted) throw new Error('Translation stream invariant violated');
+      text = await this.translator.translate(source, 'zh', { signal: control.controller.signal });
     } catch (error) {
-      emit(source.slice(consumedSource));
-      if (!state.abandoned && !this.closed) this.warning(state.threadId, '翻译内部错误；已显示的译文保持不变，其余部分保留原文。');
+      text = source;
+      if (!state.abandoned && !this.closed && !state.interrupted) this.warning(state.threadId, `回复翻译失败（${translationFailureReason(error)}）；本条回复保留原文。`);
       this.log(`Output translation stopped (${error.name || 'Error'}).`);
     } finally { this.controllers.delete(control); }
     if (state.abandoned || this.closed) return;
-    item.text = state.emitted; state.done = true; state.source = '';
-    this.shrink(state, state.emitted.length);
+    state.emitted = text; item.text = text; state.done = true; state.source = '';
+    this.resize(state, text.length);
+    if (text) this.down({ method: deltaMethod, params: { threadId: state.threadId, turnId: state.turnId, itemId: state.itemId, delta: text } });
     this.down(outgoing);
   }
 

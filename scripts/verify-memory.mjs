@@ -4,10 +4,10 @@ import { Bridge } from '../src/bridge.mjs';
 import { Translator } from '../src/translator.mjs';
 
 assert.equal(typeof global.gc, 'function', 'Run through npm run test:memory');
-const config = { batchChars: 1800, maxTextChars: 128 * 1024, maxBufferedChars: 4 * 1024 * 1024, maxLiveItems: 256 };
+const config = { maxTextChars: 128 * 1024, maxBufferedChars: 4 * 1024 * 1024, maxLiveItems: 256 };
 let submitted, completed = 0;
-const api = { async translate(records, direction) {
-  return records.map(r => direction === 'en' ? r.masked.replaceAll('你好', 'Hello') : r.masked.replaceAll('Hello', '你好'));
+const api = { async translate(text, direction) {
+  return direction === 'en' ? text.replaceAll('你好', 'Hello') : text.replaceAll('Hello', '你好');
 } };
 const bridge = new Bridge({
   config, translator: new Translator(api, config),

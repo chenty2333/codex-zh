@@ -37,7 +37,6 @@ export async function loadConfig(env = process.env, { needKey = true } = {}) {
     model: env.DEEPSEEK_MODEL || 'deepseek-flash',
     baseURL: baseURL.href.replace(/\/$/, ''),
     timeoutMs: positiveInt(env.CODEX_ZH_TIMEOUT_MS, 60000, 'CODEX_ZH_TIMEOUT_MS'),
-    batchChars: positiveInt(env.CODEX_ZH_BATCH_CHARS, 1800, 'CODEX_ZH_BATCH_CHARS'),
     maxTextChars, maxBufferedChars,
     maxLiveItems: positiveInt(env.CODEX_ZH_MAX_LIVE_ITEMS, 256, 'CODEX_ZH_MAX_LIVE_ITEMS'),
     codexBin: env.CODEX_ZH_CODEX_BIN || 'codex',
