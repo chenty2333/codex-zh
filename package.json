@@ -13,6 +13,7 @@
     "test:live": "node scripts/verify-deepseek.mjs",
     "test:native": "node scripts/verify-native.mjs",
     "test:tui": "node scripts/verify-tui.mjs",
+    "test:memory": "node --expose-gc scripts/verify-memory.mjs",
     "check": "node scripts/check.mjs"
   },
   "dependencies": { "ws": "8.21.3" },

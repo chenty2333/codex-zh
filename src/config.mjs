@@ -1,7 +1,5 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 
 const exec = promisify(execFile);
 
@@ -31,13 +29,17 @@ export async function loadConfig(env = process.env, { needKey = true } = {}) {
   if (baseURL.protocol !== 'https:' && !(baseURL.protocol === 'http:' && ['127.0.0.1', '[::1]', 'localhost'].includes(baseURL.hostname))) {
     throw new Error('DeepSeek requires HTTPS, except for loopback test servers');
   }
+  const maxTextChars = positiveInt(env.CODEX_ZH_MAX_TEXT_CHARS, 128 * 1024, 'CODEX_ZH_MAX_TEXT_CHARS');
+  const maxBufferedChars = positiveInt(env.CODEX_ZH_MAX_BUFFERED_CHARS, 4 * 1024 * 1024, 'CODEX_ZH_MAX_BUFFERED_CHARS');
+  if (maxBufferedChars < 4 * maxTextChars) throw new Error('CODEX_ZH_MAX_BUFFERED_CHARS must be at least four times CODEX_ZH_MAX_TEXT_CHARS');
   return {
     apiKey, keySource, passthrough,
     model: env.DEEPSEEK_MODEL || 'deepseek-flash',
     baseURL: baseURL.href.replace(/\/$/, ''),
     timeoutMs: positiveInt(env.CODEX_ZH_TIMEOUT_MS, 60000, 'CODEX_ZH_TIMEOUT_MS'),
     batchChars: positiveInt(env.CODEX_ZH_BATCH_CHARS, 1800, 'CODEX_ZH_BATCH_CHARS'),
-    stateDir: env.CODEX_ZH_STATE_DIR || join(env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'codex-zh'),
+    maxTextChars, maxBufferedChars,
+    maxLiveItems: positiveInt(env.CODEX_ZH_MAX_LIVE_ITEMS, 256, 'CODEX_ZH_MAX_LIVE_ITEMS'),
     codexBin: env.CODEX_ZH_CODEX_BIN || 'codex',
   };
 }

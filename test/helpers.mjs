@@ -1,13 +1,12 @@
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
-import { Store } from '../src/store.mjs';
 
 export async function fixture(t, overrides = {}) {
   const base = resolve('.test-state'); await mkdir(base, { recursive: true });
   const directory = await mkdtemp(join(base, 'unit-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const config = { model: 'deepseek-flash', baseURL: 'https://api.deepseek.com', apiKey: 'test-credential', timeoutMs: 3000, batchChars: 1800, passthrough: false, stateDir: directory, ...overrides };
-  return { directory, config, store: new Store(directory) };
+  const config = { model: 'deepseek-flash', baseURL: 'https://api.deepseek.com', apiKey: 'test-credential', timeoutMs: 3000, batchChars: 1800, passthrough: false, maxTextChars: 128 * 1024, maxBufferedChars: 4 * 1024 * 1024, maxLiveItems: 256, ...overrides };
+  return { directory, config };
 }
 
 export const deferred = () => {

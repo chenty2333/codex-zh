@@ -1,23 +1,24 @@
-import { protect, restoreRecord, assemble } from './protected-text.mjs';
-import { digest } from './store.mjs';
-import { TRANSLATION_VERSION } from './deepseek.mjs';
+import { protect, restoreRecord, assemble, IntegrityError } from './protected-text.mjs';
 
 const originalRecord = record => ({ text: record.source, parts: record.parts });
 
 export class Translator {
-  constructor(api, store, config) { this.api = api; this.store = store; this.config = config; }
+  constructor(api, config) { this.api = api; this.config = config; }
 
-  async translate(text, direction, { elements = [], signal, onChunk = () => {}, onFallback = () => {}, fallback = false } = {}) {
+  async translate(text, direction, { elements = [], signal, onChunk = () => {}, onFallback = () => {}, fallback = false, maxOutputChars = 3 * (this.config.maxTextChars ?? 128 * 1024) } = {}) {
     if (this.config.passthrough) { await onChunk(text); return { text, textElements: elements, fallback: false }; }
+    if (text.length > maxOutputChars) throw new IntegrityError('Translation exceeds the text buffer limit');
     const plan = protect(text, direction, elements);
     const restored = [];
-    let didFallback = false;
+    let didFallback = false, committedChars = 0, consumedChars = 0;
     for (let i = 0; i < plan.records.length;) {
       const first = plan.records[i];
       if (!first.translatable || signal?.aborted) {
         if (signal?.aborted && !fallback) signal.throwIfAborted();
         if (signal?.aborted) didFallback = true;
-        const value = originalRecord(first); restored.push(value); await onChunk(value.text, { sourceLength: first.source.length }); i++; continue;
+        const value = originalRecord(first); restored.push(value);
+        committedChars += value.text.length; consumedChars += first.source.length;
+        await onChunk(value.text, { sourceLength: first.source.length }); i++; continue;
       }
       // A batch is an immutable commit unit: validate every record before emitting any of it.
       const batch = [];
@@ -26,15 +27,15 @@ export class Translator {
         const record = plan.records[i++]; batch.push(record); size += record.masked.length;
       }
       const translatable = batch.filter(r => r.translatable);
-      const key = digest({ v: TRANSLATION_VERSION, model: this.config.model, endpoint: this.config.baseURL, direction, records: translatable.map(r => ({ id: r.id, text: r.masked })) });
+      const sourceChars = batch.reduce((n, r) => n + r.source.length, 0);
       let replacements;
       try {
         signal?.throwIfAborted();
-        let values;
-        try { values = await this.store.get('batches', key); } catch { /* Optional cache. */ }
-        if (!Array.isArray(values) || values.length !== translatable.length) values = await this.api.translate(translatable, direction, { signal });
+        const values = await this.api.translate(translatable, direction, { signal });
         replacements = new Map(translatable.map((r, index) => [r.id, restoreRecord(r, values[index])]));
-        try { await this.store.set('batches', key, values); } catch { /* Optional cache. */ }
+        const translatedChars = batch.reduce((n, r) => n + (replacements.get(r.id)?.text.length ?? r.source.length), 0);
+        // Always leave enough room for the untouched tail if a later batch fails.
+        if (committedChars + translatedChars + text.length - consumedChars - sourceChars > maxOutputChars) throw new IntegrityError('Translation expanded beyond its buffer limit');
         signal?.throwIfAborted();
       } catch (error) {
         if (!fallback) throw error;
@@ -44,7 +45,9 @@ export class Translator {
       }
       const committed = batch.map(r => replacements.get(r.id) || originalRecord(r));
       restored.push(...committed);
-      await onChunk(committed.map(r => r.text).join(''), { sourceLength: batch.reduce((n, r) => n + r.source.length, 0) });
+      const chunk = committed.map(r => r.text).join('');
+      committedChars += chunk.length; consumedChars += sourceChars;
+      await onChunk(chunk, { sourceLength: sourceChars });
     }
     return { ...assemble(plan, restored), fallback: didFallback };
   }

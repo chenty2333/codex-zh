@@ -7,7 +7,7 @@ import { Bridge } from './bridge.mjs';
 
 // A loopback, authenticated WebSocket transport for the unmodified native TUI.
 // The upstream side is the unmodified Codex app-server's JSON-lines stdio transport.
-export async function startServer({ translator, store, config, backendArgs = [], backendPrefix = [], cwd = process.cwd(), env = process.env, log = () => {}, spawnBackend }) {
+export async function startServer({ translator, config, backendArgs = [], backendPrefix = [], cwd = process.cwd(), env = process.env, log = () => {}, spawnBackend }) {
   const token = randomBytes(32).toString('base64url');
   const server = createServer((_req, res) => { res.writeHead(404); res.end(); });
   const wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 * 1024, perMessageDeflate: false });
@@ -26,23 +26,26 @@ export async function startServer({ translator, store, config, backendArgs = [],
     const child = spawnBackend ? spawnBackend() : spawn(config.codexBin, [...backendPrefix, 'app-server', '--stdio', ...backendArgs], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     const connection = { socket, child, bridge: null };
     connections.add(connection);
-    let pendingBytes = 0, stopped = false, lineBuffer = '';
+    let pendingBytes = 0, pendingWorkBytes = 0, pendingFrames = 0;
+    let stopped = false, lineBuffer = '', pumping = false;
     const decoder = new StringDecoder('utf8');
+    const canRead = () => !stopped && pendingBytes < 8 * 1024 * 1024 && pendingWorkBytes < 8 * 1024 * 1024 && pendingFrames < 128;
+    const updateReadState = () => { if (canRead()) child.stdout?.resume(); else child.stdout?.pause(); };
     const sendDown = message => {
       if (socket.readyState !== WebSocket.OPEN) return;
       const payload = JSON.stringify(message);
       const bytes = Buffer.byteLength(payload); pendingBytes += bytes;
-      if (pendingBytes > 8 * 1024 * 1024) child.stdout?.pause();
+      updateReadState();
       socket.send(payload, error => {
         pendingBytes -= bytes;
-        if (pendingBytes < 4 * 1024 * 1024) child.stdout?.resume();
         if (error) shutdown();
+        pump(); updateReadState();
       });
     };
     const sendUp = message => {
       if (!stopped && !child.stdin.destroyed) child.stdin.write(`${JSON.stringify(message)}\n`);
     };
-    const bridge = new Bridge({ translator, store, config, sendUp, sendDown, log });
+    const bridge = new Bridge({ translator, config, sendUp, sendDown, log });
     connection.bridge = bridge;
     const shutdown = () => {
       if (stopped) return; stopped = true;
@@ -62,18 +65,37 @@ export async function startServer({ translator, store, config, backendArgs = [],
       } catch { socket.close(1003, 'Invalid JSON-RPC frame'); }
     });
     socket.on('close', shutdown); socket.on('error', shutdown);
+    // Bound queued native frames as well as text retained by the translator.
+    // Translation does not depend on Codex, so pausing stdout here cannot block
+    // its own completion. The separate stdin/control path stays available.
+    const pump = () => {
+      if (pumping || stopped) return;
+      pumping = true;
+      try {
+        let end;
+        while (canRead() && (end = lineBuffer.indexOf('\n')) >= 0) {
+          const line = lineBuffer.slice(0, end).trim(); lineBuffer = lineBuffer.slice(end + 1);
+          if (!line) continue;
+          let message;
+          try { message = JSON.parse(line); }
+          catch { log('Codex emitted an invalid protocol frame.'); shutdown(); break; }
+          const bytes = Buffer.byteLength(line);
+          pendingFrames++; pendingWorkBytes += bytes;
+          Promise.resolve().then(() => bridge.fromServer(message)).catch(() => {
+            log('Codex message processing failed.'); shutdown();
+          }).finally(() => {
+            pendingFrames--; pendingWorkBytes -= bytes;
+            pump(); updateReadState();
+          });
+        }
+      } finally { pumping = false; updateReadState(); }
+    };
     child.stdout.on('data', chunk => {
       lineBuffer += decoder.write(chunk);
-      if (lineBuffer.length > 128 * 1024 * 1024) { log('Codex protocol frame exceeds size limit.'); shutdown(); return; }
-      let end;
-      while ((end = lineBuffer.indexOf('\n')) >= 0) {
-        const line = lineBuffer.slice(0, end).trim(); lineBuffer = lineBuffer.slice(end + 1);
-        if (!line) continue;
-        try {
-          const message = JSON.parse(line);
-          bridge.fromServer(message).catch(() => { log('Codex message processing failed.'); shutdown(); });
-        } catch { log('Codex emitted an invalid protocol frame.'); shutdown(); }
+      if (lineBuffer.length > 128 * 1024 * 1024) {
+        log('Codex protocol frame exceeds size limit.'); shutdown(); return;
       }
+      pump();
     });
     // Drain stderr without persisting credentials or user material. Protocol errors are surfaced by Codex itself.
     child.stderr?.resume();

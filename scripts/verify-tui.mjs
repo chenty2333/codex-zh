@@ -3,6 +3,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { sse, completedResponse } from '../test/helpers.mjs';
 
 let translatedInputSeen = false, translatorCalls = 0;
@@ -34,6 +36,13 @@ const http = createServer(async (req, res) => {
 await new Promise(resolve => http.listen(0, '127.0.0.1', resolve));
 const url = `http://127.0.0.1:${http.address().port}`;
 const project = resolve(fileURLToPath(new URL('..', import.meta.url)));
+async function syntheticHistoryEntries() {
+  try {
+    const history = await readFile(resolve(process.env.CODEX_HOME || `${homedir()}/.codex`, 'history.jsonl'), 'utf8');
+    return history.split('\n').filter(line => { try { return JSON.parse(line).text === '请测试翻译桥接。'; } catch { return false; } }).length;
+  } catch (error) { if (error.code !== 'ENOENT') throw error; return 0; }
+}
+const previousHistoryEntries = await syntheticHistoryEntries();
 const nativeArgs = [
   '--no-alt-screen', '-C', project,
   '-c', `projects.${JSON.stringify(project)}.trust_level="trusted"`,
@@ -49,11 +58,13 @@ const nativeArgs = [
 try {
   const child = spawn('python3', ['scripts/tui-driver.py', process.execPath, 'bin/codex-zh.mjs', '--', ...nativeArgs], {
     cwd: project, stdio: ['ignore', 'inherit', 'inherit'],
-    env: { ...process.env, DEEPSEEK_API_KEY: 'test-credential', DEEPSEEK_BASE_URL: url, CODEX_ZH_STATE_DIR: `${project}/.test-state/tui/state` },
+    env: { ...process.env, DEEPSEEK_API_KEY: 'test-credential', DEEPSEEK_BASE_URL: url },
   });
   const code = await new Promise(resolve => child.on('close', resolve));
   assert.equal(code, 0, 'Native TUI verification failed; inspect .test-state/tui/capture.log');
   assert.ok(translatedInputSeen, 'The model did not receive the English input');
   assert.ok(translatorCalls >= 2, 'Both translation directions must be exercised');
+  assert.equal(await syntheticHistoryEntries(), previousHistoryEntries, 'The native TUI must not persist the untranslated Chinese prompt in input history');
   console.log('Unmodified native Codex TUI: Chinese prompt → English model input → Chinese rendered reply passed.');
+  console.log('Native input-history file: no additional Chinese prompt persisted.');
 } finally { await new Promise(resolve => http.close(resolve)); }

@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { loadConfig } from '../src/config.mjs';
-import { Store } from '../src/store.mjs';
 import { DeepSeek } from '../src/deepseek.mjs';
 import { Translator } from '../src/translator.mjs';
 import { Bridge } from '../src/bridge.mjs';
@@ -10,8 +9,7 @@ const config = await loadConfig();
 config.batchChars = 1800;
 const directory = new URL('../.test-state/live/', import.meta.url).pathname;
 await mkdir(directory, { recursive: true, mode: 0o700 });
-const store = new Store(directory);
-const translator = new Translator(new DeepSeek(config), store, config);
+const translator = new Translator(new DeepSeek(config), config);
 const samples = [
   { direction: 'en', text: '请修复登录错误。不要修改 `src/auth.ts` 中的 `TIMEOUT_MS = 3000`。\n按钮文字必须保持“提交”。', literals: ['`src/auth.ts`', '`TIMEOUT_MS = 3000`', '“提交”'], check: text => /do not|don.t/i.test(text) },
   { direction: 'en', text: '不要修改任何文件，只解释这个错误；我还没有授权执行命令。', literals: [], check: text => /do not|don.t/i.test(text) && /not|haven.t/i.test(text) },
@@ -31,7 +29,7 @@ for (const [index, sample] of samples.entries()) {
   console.log(`DeepSeek live sample ${index + 1}/${samples.length}: passed`);
 }
 const messages = [];
-const bridge = new Bridge({ config, translator, store, sendUp() {}, sendDown: m => messages.push(m) });
+const bridge = new Bridge({ config, translator, sendUp() {}, sendDown: m => messages.push(m) });
 await bridge.fromServer({ method: 'item/started', params: { threadId: 'live', turnId: 'live-turn', item: { type: 'agentMessage', id: 'live-item', text: '' } } });
 await bridge.fromServer({ method: 'item/agentMessage/delta', params: { threadId: 'live', turnId: 'live-turn', itemId: 'live-item', delta: 'provisional text that must not be displayed' } });
 await bridge.fromServer({ method: 'item/completed', params: { threadId: 'live', turnId: 'live-turn', item: { type: 'agentMessage', id: 'live-item', text: samples[3].text } } });
