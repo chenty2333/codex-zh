@@ -42,6 +42,34 @@ test('unauthenticated local clients cannot start or access a backend', async t =
   assert.equal(response, 401); assert.equal(spawns, 0);
 });
 
+test('a picker connection can query history and close while the main connection stays usable', { timeout: 10000 }, async t => {
+  const server = await startServer({ config: { passthrough: true }, spawnBackend: () => spawn(process.execPath, [fileURLToPath(new URL('./fake-backend.mjs', import.meta.url))], { stdio: ['pipe', 'pipe', 'pipe'] }) });
+  t.after(() => server.close());
+  const connect = async () => {
+    const socket = new WebSocket(server.url, { headers: { Authorization: `Bearer ${server.token}` } });
+    t.after(() => socket.terminate());
+    await once(socket, 'open');
+    return socket;
+  };
+  const main = await connect(), picker = await connect();
+  const request = async (socket, method, params) => {
+    const response = once(socket, 'message');
+    socket.send(JSON.stringify({ id: 1, method, params }));
+    return JSON.parse((await response)[0].toString()).result;
+  };
+  const [mainResult, pickerResult] = await Promise.all([
+    request(main, 'thread/read', { threadId: 'main' }),
+    request(picker, 'thread/list', { sourceKinds: ['cli', 'vscode'] }),
+  ]);
+  assert.deepEqual(mainResult.echoed, { threadId: 'main' });
+  assert.deepEqual(pickerResult.echoed, { sourceKinds: ['cli', 'vscode'] });
+  assert.equal(server.connections.size, 2);
+  picker.close();
+  await once(picker, 'close');
+  assert.deepEqual((await request(main, 'thread/resume', { threadId: 'selected' })).echoed, { threadId: 'selected' });
+  assert.equal(server.connections.size, 1);
+});
+
 test('slow translation bounds queued native frames and then drains a long burst without losing replies', { timeout: 10000 }, async t => {
   const { config } = await fixture(t, { maxLiveItems: 1, maxTextChars: 128, maxBufferedChars: 512 });
   const entered = deferred(), release = deferred(), finished = deferred();

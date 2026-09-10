@@ -6,6 +6,7 @@ import { loadConfig } from '../src/config.mjs';
 import { DeepSeek } from '../src/deepseek.mjs';
 import { Translator } from '../src/translator.mjs';
 import { startServer } from '../src/server.mjs';
+import { resumeCommand } from '../src/resume.mjs';
 
 const HELP = `codex-zh — 原生 Codex TUI 的中英翻译代理
 
@@ -19,7 +20,13 @@ const HELP = `codex-zh — 原生 Codex TUI 的中英翻译代理
   codex-zh
   codex-zh -C /path/to/project
   codex-zh resume --last
+  codex-zh resume --all
+  codex-zh resume SESSION_ID
   codex-zh -- -m your-codex-model
+
+进入后输入 /resume 选择原生历史；resume --all 可跨目录查找。
+按 ID 恢复只需 codex-zh resume SESSION_ID，自动沿用原会话目录。
+退出后复制最后一行的 codex-zh 恢复命令，不需要旧 ws 地址。
 
 翻译模型：DeepSeek-V4.1-Flash（API 名：deepseek-flash），/responses。
 原生 Codex 的模型和配置继续由 Codex 管理。
@@ -81,7 +88,11 @@ async function main() {
   const { code, signal } = await new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
   process.off('SIGTERM', onTerm); process.off('SIGINT', onInt);
   await server.close();
-  if (!childError) console.error('codex-zh: 本地会话已关闭，未完成的后台工作也会停止。恢复历史请用 codex-zh resume。');
+  if (!childError) {
+    console.error('codex-zh: 本地会话已关闭，未完成的后台工作也会停止；上方临时 ws 重连地址已失效。');
+    const command = resumeCommand(server.resumeSession, { passthrough: config.passthrough, profileArgs: backendPrefix });
+    console.error(`codex-zh: ${server.resumeSession ? '恢复本次对话' : '选择历史对话'}：${command}`);
+  }
   process.exitCode = childError ? 1 : code ?? (signal === 'SIGINT' ? 130 : 1);
 }
 

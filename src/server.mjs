@@ -4,6 +4,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Bridge } from './bridge.mjs';
+import { ResumeTracker } from './resume.mjs';
 
 // A loopback, authenticated WebSocket transport for the unmodified native TUI.
 // The upstream side is the unmodified Codex app-server's JSON-lines stdio transport.
@@ -12,6 +13,7 @@ export async function startServer({ translator, config, backendArgs = [], backen
   const server = createServer((_req, res) => { res.writeHead(404); res.end(); });
   const wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 * 1024, perMessageDeflate: false });
   const connections = new Set();
+  const resumeState = { session: null };
   let closing = false;
   server.on('upgrade', (req, socket, head) => {
     const expected = Buffer.from(`Bearer ${token}`);
@@ -19,10 +21,13 @@ export async function startServer({ translator, config, backendArgs = [], backen
     if (closing || req.headers.origin || expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
       socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); return;
     }
-    if (connections.size) { socket.end('HTTP/1.1 409 Conflict\r\nConnection: close\r\n\r\n'); return; }
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
   });
   wss.on('connection', socket => {
+    // The native /resume picker opens a second connection while the main TUI
+    // stays connected. Each stdio client needs its own protocol state/backend;
+    // all backends inherit the same CODEX_HOME and share native session storage.
+    const resume = new ResumeTracker(cwd, resumeState);
     const child = spawnBackend ? spawnBackend() : spawn(config.codexBin, [...backendPrefix, 'app-server', '--stdio', ...backendArgs], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     const connection = { socket, child, bridge: null };
     connections.add(connection);
@@ -33,6 +38,7 @@ export async function startServer({ translator, config, backendArgs = [], backen
     const updateReadState = () => { if (canRead()) child.stdout?.resume(); else child.stdout?.pause(); };
     const sendDown = message => {
       if (socket.readyState !== WebSocket.OPEN) return;
+      resume.fromServer(message);
       const payload = JSON.stringify(message);
       const bytes = Buffer.byteLength(payload); pendingBytes += bytes;
       updateReadState();
@@ -43,13 +49,17 @@ export async function startServer({ translator, config, backendArgs = [], backen
       });
     };
     const sendUp = message => {
-      if (!stopped && !child.stdin.destroyed) child.stdin.write(`${JSON.stringify(message)}\n`);
+      if (!stopped && !child.stdin.destroyed) {
+        resume.fromClient(message);
+        child.stdin.write(`${JSON.stringify(message)}\n`);
+      }
     };
     const bridge = new Bridge({ translator, config, sendUp, sendDown, log });
     connection.bridge = bridge;
     const shutdown = () => {
       if (stopped) return; stopped = true;
       bridge.close(); connections.delete(connection);
+      resume.disconnect();
       child.stdin?.end();
       if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
       const force = setTimeout(() => { if (child.exitCode === null) child.kill('SIGKILL'); }, 2500); force.unref();
@@ -106,6 +116,7 @@ export async function startServer({ translator, config, backendArgs = [], backen
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   return {
     url: `ws://127.0.0.1:${server.address().port}`, token, connections,
+    get resumeSession() { return resumeState.session; },
     async close() {
       if (closing) return; closing = true;
       for (const connection of connections) connection.shutdown();

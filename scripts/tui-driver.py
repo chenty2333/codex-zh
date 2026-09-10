@@ -1,4 +1,4 @@
-"""Exercise the real terminal UI through a PTY; capture only synthetic test content."""
+"""Exercise real native terminal sessions and the /resume picker through a PTY."""
 import errno
 import fcntl
 import json
@@ -23,46 +23,107 @@ process = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave
 os.close(slave)
 capture = bytearray()
 deadline = time.monotonic() + 55
-quit_sent = False
-translated = False
-native = False
 trust_handled = False
-try:
+native_mode = env.get('CODEX_ZH_TUI_NATIVE') == '1'
+allow_history = native_mode or env.get('CODEX_ZH_TUI_ALLOW_HISTORY') == '1'
+picker_name = env.get('CODEX_ZH_TUI_PICKER_NAME')
+fixture_name = env.get('CODEX_ZH_TUI_FIXTURE_NAME')
+picker_opened = False
+workflow_complete = False
+error_message = None
+
+
+def visible(start=0):
+    text = capture[start:].decode('utf8', errors='replace')
+    text = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', text)
+    return re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
+
+
+def read_output():
+    global trust_handled
+    readable, _, _ = select.select([master], [], [], 0.1)
+    if not readable:
+        return process.poll() is None
+    try:
+        chunk = os.read(master, 65536)
+    except OSError as error:
+        if error.errno == errno.EIO:
+            return False
+        raise
+    if not chunk:
+        return False
+    capture.extend(chunk)
+    if b'\x1b[6n' in chunk:
+        os.write(master, b'\x1b[1;1R')
+    if b'\x1b[c' in chunk:
+        os.write(master, b'\x1b[?1;2c')
+    if not trust_handled and 'Doyoutrustthecontentsofthisdirectory?' in re.sub(r'\s+', '', visible()):
+        time.sleep(0.4)
+        os.write(master, b'\r')
+        trust_handled = True
+    return True
+
+
+def wait_for(text, start=0):
     while time.monotonic() < deadline:
-        readable, _, _ = select.select([master], [], [], 0.1)
-        if readable:
-            try:
-                chunk = os.read(master, 65536)
-            except OSError as error:
-                if error.errno == errno.EIO:
-                    break
-                raise
-            if not chunk:
-                break
-            capture.extend(chunk)
-            if b'\x1b[6n' in chunk:
-                os.write(master, b'\x1b[1;1R')
-            if b'\x1b[c' in chunk:
-                os.write(master, b'\x1b[?1;2c')
-            text = capture.decode('utf8', errors='replace')
-            text = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', text)
-            text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
-            native = native or 'OpenAI Codex' in text
-            translated = translated or '桥接已就绪。' in text
-            if 'Doyoutrustthecontentsofthisdirectory?' in re.sub(r'\s+', '', text) and not trust_handled:
-                os.write(master, b'\r')
-                trust_handled = True
-            if translated and not quit_sent:
-                # Avoid the native TUI's burst-paste detection when submitting a slash command.
-                time.sleep(0.4)
-                for character in '/quit':
-                    os.write(master, character.encode())
-                    time.sleep(0.025)
-                time.sleep(0.4)
-                os.write(master, b'\r')
-                quit_sent = True
-        if process.poll() is not None:
+        if text in visible(start):
+            return
+        if not read_output():
             break
+    raise RuntimeError(f'TUI did not show {text!r}')
+
+
+def drain_for(seconds):
+    end = min(deadline, time.monotonic() + seconds)
+    while time.monotonic() < end and read_output():
+        pass
+
+
+def type_text(text):
+    # Avoid the native TUI's burst-paste detection for slash commands.
+    time.sleep(0.4)
+    for character in text:
+        os.write(master, character.encode())
+        time.sleep(0.025)
+    time.sleep(0.4)
+
+
+def send_line(text):
+    type_text(text)
+    os.write(master, b'\r')
+
+
+try:
+    try:
+        wait_for('OpenAI Codex')
+        if picker_name:
+            wait_for('gpt-5.1-codex-mini')
+            drain_for(1)
+            send_line('/resume')
+            wait_for('Resume a previous session')
+            picker_opened = True
+            type_text(picker_name)
+            wait_for('1 / 1')
+            drain_for(0.4)
+            start = len(capture)
+            os.write(master, b'\r')
+            wait_for('The bridge is ready.', start)
+            start = len(capture)
+            send_line('请测试翻译桥接。')
+            wait_for('桥接已就绪。', start)
+        elif native_mode:
+            wait_for('The bridge is ready.')
+            if fixture_name:
+                send_line('/rename ' + fixture_name)
+                drain_for(1)
+        else:
+            wait_for('桥接已就绪。')
+        send_line('/quit')
+        while time.monotonic() < deadline and read_output():
+            pass
+        workflow_complete = True
+    except RuntimeError as error:
+        error_message = str(error)
     if process.poll() is None:
         os.killpg(process.pid, signal.SIGTERM)
         try:
@@ -70,13 +131,20 @@ try:
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=4)
-    directory = Path('.test-state/tui')
+    directory = Path(env.get('CODEX_ZH_TUI_REPORT_DIR', '.test-state/tui'))
     directory.mkdir(parents=True, exist_ok=True)
     (directory / 'capture.log').write_bytes(capture)
-    report = {'nativeTuiFound': native, 'trustPromptHandled': trust_handled, 'translatedReplyVisible': translated, 'nativeEnglishReplyLeaked': 'The bridge is ready.' in capture.decode('utf8', errors='replace'), 'exitCode': process.returncode}
+    text = visible()
+    original_visible = 'The bridge is ready.' in text
+    report = {'nativeTuiFound': 'OpenAI Codex' in text, 'trustPromptHandled': trust_handled,
+              'translatedReplyVisible': '桥接已就绪。' in text,
+              'nativeEnglishReplyLeaked': original_visible and not allow_history,
+              'originalHistoryVisible': original_visible and allow_history,
+              'pickerOpened': picker_opened, 'workflowComplete': workflow_complete,
+              'exitCode': process.returncode, 'error': error_message}
     (directory / 'report.json').write_text(json.dumps(report, indent=2))
     print(json.dumps(report))
-    sys.exit(0 if native and translated and not report['nativeEnglishReplyLeaked'] and process.returncode == 0 else 1)
+    sys.exit(0 if workflow_complete and not report['nativeEnglishReplyLeaked'] and process.returncode == 0 else 1)
 finally:
     os.close(master)
     if process.poll() is None:

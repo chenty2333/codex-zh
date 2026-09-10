@@ -115,6 +115,8 @@ try {
   const nativeUserAgent = connection.initialization.userAgent;
   assert.ok(nativeUserAgent);
   const { thread } = await connection.request('thread/start', { cwd: new URL('..', import.meta.url).pathname, ephemeral: false, model: 'gpt-5.1-codex-mini', modelProvider: 'codex_zh_verification', approvalPolicy: 'never', sandbox: 'read-only' });
+  assert.equal(connection.server.resumeSession.id, thread.id);
+  assert.equal(connection.server.resumeSession.cwd, thread.cwd);
   await runTurn(connection, thread.id);
   assert.equal(translationCalls, 2);
   const history = await connection.request('thread/read', { threadId: thread.id, includeTurns: true });
@@ -127,6 +129,8 @@ try {
   await connection.close();
   connection = await connect();
   const resumed = await connection.request('thread/resume', { threadId: thread.id });
+  assert.equal(connection.server.resumeSession.id, thread.id);
+  assert.equal(connection.server.resumeSession.cwd, resumed.thread.cwd);
   assertEnglishHistory(resumed.thread);
   assert.equal(translationCalls, 2, 'Resuming old history must not call the translator');
   await runTurn(connection, thread.id);
