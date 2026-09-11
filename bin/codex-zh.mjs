@@ -25,6 +25,7 @@ const HELP = `codex-zh — 原生 Codex TUI 的中英翻译代理
   codex-zh -- -m your-codex-model
 
 进入后输入 /resume 选择原生历史；resume --all 可跨目录查找。
+↑/↓ 输入历史与原生 Codex 共享，遵循原生 history 配置。
 按 ID 恢复只需 codex-zh resume SESSION_ID，自动沿用原会话目录。
 退出后复制最后一行的 codex-zh 恢复命令，不需要旧 ws 地址。
 
@@ -47,7 +48,7 @@ async function main() {
   const config = await loadConfig({ ...process.env, ...(passthrough ? { CODEX_ZH_PASSTHROUGH: '1' } : {}) }, { needKey: !doctor });
   if (doctor) {
     const { stdout } = await promisify(execFile)(config.codexBin, ['--version'], { timeout: 10000 });
-    console.log(JSON.stringify({ codex: stdout.trim(), translationModel: config.model, responsesEndpoint: `${config.baseURL}/responses`, keySource: config.keySource, translationPersistence: false, inputHistoryPersistence: false, maxTextChars: config.maxTextChars, maxBufferedChars: config.maxBufferedChars, maxLiveItems: config.maxLiveItems, passthrough: config.passthrough }, null, 2));
+    console.log(JSON.stringify({ codex: stdout.trim(), translationModel: config.model, responsesEndpoint: `${config.baseURL}/responses`, keySource: config.keySource, translationPersistence: false, inputHistoryPersistence: 'native-config', maxTextChars: config.maxTextChars, maxBufferedChars: config.maxBufferedChars, maxLiveItems: config.maxLiveItems, passthrough: config.passthrough }, null, 2));
     return;
   }
   const backendArgs = [], backendPrefix = [];
@@ -68,14 +69,10 @@ async function main() {
       backendCwd = resolve(native[++i]);
     } else if (arg.startsWith('--cd=')) backendCwd = resolve(arg.slice(5));
   }
-  // Native TUI input recall normally saves the pre-translation Chinese prompt
-  // separately from the English session. Disable that file for this launch only.
-  const historyOverride = ['-c', 'history.persistence="none"'];
-  backendArgs.push(...historyOverride);
   const translator = new Translator(new DeepSeek(config), config);
   const server = await startServer({ config, translator, backendArgs, backendPrefix, cwd: backendCwd, log: text => console.error(`codex-zh: ${text}`) });
   const authEnv = 'CODEX_ZH_BRIDGE_TOKEN';
-  const child = spawn(config.codexBin, ['--remote', server.url, '--remote-auth-token-env', authEnv, ...native, ...historyOverride], {
+  const child = spawn(config.codexBin, ['--remote', server.url, '--remote-auth-token-env', authEnv, ...native], {
     stdio: 'inherit', env: { ...process.env, [authEnv]: server.token },
   });
   let childError = false;

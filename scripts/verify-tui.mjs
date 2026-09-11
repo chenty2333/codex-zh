@@ -3,8 +3,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import assert from 'node:assert/strict';
-import { readFile, mkdir } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { readFile, mkdir, mkdtemp } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { sse, completedResponse } from '../test/helpers.mjs';
 
@@ -38,9 +37,12 @@ const url = `http://127.0.0.1:${http.address().port}`;
 const project = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const workspace = resolve(project, '.test-state/tui/workspace');
 await mkdir(workspace, { recursive: true });
+// Give both native Codex and the bridge the same isolated home. Arrow-key tests
+// must neither expose real input history nor depend on concurrent user prompts.
+process.env.CODEX_HOME = await mkdtemp(resolve(project, '.test-state/tui/home-'));
 async function syntheticHistoryEntries() {
   try {
-    const history = await readFile(resolve(process.env.CODEX_HOME || `${homedir()}/.codex`, 'history.jsonl'), 'utf8');
+    const history = await readFile(resolve(process.env.CODEX_HOME, 'history.jsonl'), 'utf8');
     return history.split('\n').filter(line => { try { return JSON.parse(line).text === '请测试翻译桥接。'; } catch { return false; } }).length;
   } catch (error) { if (error.code !== 'ENOENT') throw error; return 0; }
 }
@@ -82,13 +84,13 @@ async function nativeClient() {
   send({ method: 'initialized' });
   return { request, close() { lines.close(); child.stdin.end(); child.kill(); } };
 }
-async function runTui(args, stage, { allowHistory = false, directNative = false, pickerName, fixtureName } = {}) {
+async function runTui(args, stage, { allowHistory = false, directNative = false, pickerName, fixtureName, historyPrompt } = {}) {
   const directory = resolve(project, '.test-state/tui', stage);
   const commandArgs = directNative ? [codexBin] : [process.execPath, 'bin/codex-zh.mjs', '--'];
-  const prompt = pickerName ? [] : [directNative ? 'Please test the translation bridge.' : '请测试翻译桥接。'];
+  const prompt = pickerName || historyPrompt ? [] : [directNative ? 'Please test the translation bridge.' : '请测试翻译桥接。'];
   const child = spawn('python3', ['scripts/tui-driver.py', ...commandArgs, ...args, ...prompt], {
     cwd: project, stdio: ['ignore', 'inherit', 'inherit'],
-    env: { ...process.env, DEEPSEEK_API_KEY: 'test-credential', DEEPSEEK_BASE_URL: url, CODEX_ZH_TUI_REPORT_DIR: directory, CODEX_ZH_TUI_ALLOW_HISTORY: allowHistory ? '1' : '0', CODEX_ZH_TUI_NATIVE: directNative ? '1' : '0', CODEX_ZH_TUI_PICKER_NAME: pickerName || '', CODEX_ZH_TUI_FIXTURE_NAME: fixtureName || '' },
+    env: { ...process.env, DEEPSEEK_API_KEY: 'test-credential', DEEPSEEK_BASE_URL: url, CODEX_ZH_TUI_REPORT_DIR: directory, CODEX_ZH_TUI_ALLOW_HISTORY: allowHistory ? '1' : '0', CODEX_ZH_TUI_NATIVE: directNative ? '1' : '0', CODEX_ZH_TUI_PICKER_NAME: pickerName || '', CODEX_ZH_TUI_FIXTURE_NAME: fixtureName || '', CODEX_ZH_TUI_HISTORY_PROMPT: historyPrompt || '' },
   });
   const code = await new Promise(resolve => child.on('close', resolve));
   assert.equal(code, 0, `Native TUI ${stage} verification failed; inspect ${directory}/capture.log`);
@@ -112,7 +114,13 @@ let client;
 const fixtures = new Set();
 try {
   client = await nativeClient();
-  const first = await runTui(nativeArgs, 'start');
+  const fixtureName = `NativeHistory_${Date.now()}`;
+  const native = await runTui(nativeArgs, 'native-start', { directNative: true, fixtureName });
+  fixtures.add(native.sessionId);
+  const stored = (await client.request('thread/read', { threadId: native.sessionId })).thread;
+  assert.equal(stored.source, 'cli');
+  assert.equal(stored.name, fixtureName);
+  const first = await runTui(nativeArgs, 'start', { historyPrompt: 'Please test the translation bridge.' });
   fixtures.add(first.sessionId);
   assert.equal(userInputTranslations, 1);
   // Use the printed command, with the local mock provider options added back.
@@ -122,21 +130,23 @@ try {
   assert.equal(userInputTranslations, 2, 'Resuming must translate the new prompt exactly once');
   const recent = await runTui([...nativeArgs, 'resume', '--last'], 'resume-last', { allowHistory: true });
   assert.equal(recent.sessionId, first.sessionId);
-  const fixtureName = `NativeHistory_${Date.now()}`;
-  const native = await runTui([...nativeArgs, '-c', 'history.persistence="none"'], 'native-start', { directNative: true, fixtureName });
-  fixtures.add(native.sessionId);
-  const stored = (await client.request('thread/read', { threadId: native.sessionId })).thread;
-  assert.equal(stored.source, 'cli');
-  assert.equal(stored.name, fixtureName);
   const picked = await runTui(nativeArgs, 'slash-resume', { pickerName: fixtureName, allowHistory: true });
   assert.equal(picked.sessionId, native.sessionId, 'The in-session /resume picker must reopen the native CLI fixture');
-  const plainResumed = await runTui([...nativeArgs, '-c', 'history.persistence="none"', 'resume', first.sessionId], 'native-resume-bridge', { directNative: true });
+  // Resumed composers prefer inputs from their own transcript. A fresh native
+  // composer exercises the global history shared across commands and sessions.
+  const recalled = await runTui(nativeArgs, 'native-recall', { directNative: true, historyPrompt: '请测试翻译桥接。' });
+  fixtures.add(recalled.sessionId);
+  const plainResumed = await runTui([...nativeArgs, 'resume', first.sessionId], 'native-resume-bridge', { directNative: true });
   assert.equal(plainResumed.sessionId, first.sessionId, 'Plain Codex must also resume a bridge-created session');
   assert.ok(translatedInputSeen, 'The model did not receive the English input');
   assert.equal(userInputTranslations, 4);
-  assert.equal(await syntheticHistoryEntries(), previousHistoryEntries, 'The native TUI must not persist the untranslated Chinese prompt in input history');
+  assert.equal(await syntheticHistoryEntries(), previousHistoryEntries + 4, 'Each bridge prompt must be saved to the shared native input history');
+  const beforeDisabled = await readFile(resolve(process.env.CODEX_HOME, 'history.jsonl'), 'utf8');
+  const disabled = await runTui([...nativeArgs, '-c', 'history.persistence="none"'], 'history-disabled');
+  fixtures.add(disabled.sessionId);
+  assert.equal(await readFile(resolve(process.env.CODEX_HOME, 'history.jsonl'), 'utf8'), beforeDisabled, 'An explicit native history opt-out must still be respected');
   console.log('Unmodified native Codex TUI: Chinese prompt → English model input → Chinese rendered reply passed.');
-  console.log('Native input-history file: no additional Chinese prompt persisted.');
+  console.log('Native and bridge prompt history is shared both ways through Up/Down; explicit history opt-out is respected.');
   console.log('Printed resume command and resume --last reopen the same session after a full launcher restart.');
   console.log('/resume selects a native Codex session and continues translating; native Codex can resume bridge sessions too.');
 } finally {

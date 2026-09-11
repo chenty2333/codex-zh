@@ -52,7 +52,9 @@ codex-zh Bridge
 
 ## 原生持久化
 
-启动器对 TUI 和 app-server 都追加本次进程的 `history.persistence="none"`，避免原生输入回溯文件另存翻译前的中文 prompt。会话 rollout 仍保存实际提交的英文用户消息与 Codex 原始输出，供原生 `resume` 使用。全局 Codex 配置不改动。
+启动器沿用原生 `history.persistence` 和 `history.max_bytes` 配置，TUI 与原生 Codex 使用同一 `CODEX_HOME/history.jsonl`。上下方向键共享已提交的输入原文，包括翻译前的中文 prompt；重启或切换两个命令后仍可取回。用户显式设置 `history.persistence="none"` 时不新增输入历史。全局 Codex 配置不改动。
+
+输入回溯文件与会话记录用途不同：会话 rollout 仍保存实际提交给 Codex 的英文用户消息与 Codex 原始输出，供原生 `resume` 使用。中文回复译文仍只保存在当前回合内存中。
 
 ## 恢复对话
 

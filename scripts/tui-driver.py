@@ -28,6 +28,9 @@ native_mode = env.get('CODEX_ZH_TUI_NATIVE') == '1'
 allow_history = native_mode or env.get('CODEX_ZH_TUI_ALLOW_HISTORY') == '1'
 picker_name = env.get('CODEX_ZH_TUI_PICKER_NAME')
 fixture_name = env.get('CODEX_ZH_TUI_FIXTURE_NAME')
+history_prompt = env.get('CODEX_ZH_TUI_HISTORY_PROMPT')
+history_recalled = False
+history_empty_restored = False
 picker_opened = False
 workflow_complete = False
 error_message = None
@@ -64,9 +67,12 @@ def read_output():
     return True
 
 
-def wait_for(text, start=0):
+def wait_for(text, start=0, compact=False):
     while time.monotonic() < deadline:
-        if text in visible(start):
+        actual = visible(start)
+        # Cursor-positioned redraws can omit spaces from the raw PTY stream.
+        matches = re.sub(r'\s+', '', text) in re.sub(r'\s+', '', actual) if compact else text in actual
+        if matches:
             return
         if not read_output():
             break
@@ -96,14 +102,32 @@ def send_line(text):
 try:
     try:
         wait_for('OpenAI Codex')
+        if history_prompt:
+            wait_for('gpt-5.1-codex-mini')
+            drain_for(1)
+            start = len(capture)
+            os.write(master, b'\x1b[A')
+            wait_for(history_prompt, start, compact=True)
+            history_recalled = True
+            start = len(capture)
+            os.write(master, b'\x1b[B')
+            wait_for('Ask Codex to do anything', start, compact=True)
+            history_empty_restored = True
+            start = len(capture)
+            os.write(master, b'\x1b[A')
+            wait_for(history_prompt, start, compact=True)
+            os.write(master, b'\x15')
+            send_line('Please test the translation bridge.' if native_mode else '请测试翻译桥接。')
         if picker_name:
             wait_for('gpt-5.1-codex-mini')
             drain_for(1)
             send_line('/resume')
             wait_for('Resume a previous session')
             picker_opened = True
+            wait_for(picker_name, compact=True)
             type_text(picker_name)
-            wait_for('1 / 1')
+            # Wait until the initial rows exist before filtering. The terminal
+            # redraws only changed count digits, so raw output has no full 1 / 1.
             drain_for(0.4)
             start = len(capture)
             os.write(master, b'\r')
@@ -141,6 +165,7 @@ try:
               'nativeEnglishReplyLeaked': original_visible and not allow_history,
               'originalHistoryVisible': original_visible and allow_history,
               'pickerOpened': picker_opened, 'workflowComplete': workflow_complete,
+              'sharedPromptRecalled': history_recalled, 'emptyComposerRestoredWithDown': history_empty_restored,
               'exitCode': process.returncode, 'error': error_message}
     (directory / 'report.json').write_text(json.dumps(report, indent=2))
     print(json.dumps(report))

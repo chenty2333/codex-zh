@@ -1,8 +1,8 @@
 # 验证记录
 
-本次验证：2026-09-10，Linux，Node.js 24.15.0，Codex CLI 0.154.0。
+最近验证：2026-09-11，Linux，Node.js 24.15.0，Codex CLI 0.154.0。
 
-33 项自动化测试、语法检查、真实 app-server 重启恢复、真实 TUI 与 20,000 回合内存测试均通过。两条真实 DeepSeek 整文请求正常完成，返回正文未做内容或格式判定。
+33 项自动化测试、语法检查和真实 TUI 验证通过。2026-09-10 的真实 app-server 重启恢复与 20,000 回合内存测试通过；两条真实 DeepSeek 整文请求正常完成，返回正文未做内容或格式判定。
 
 ## 自动化测试
 
@@ -33,9 +33,11 @@
 
 `npm run test:native` 启动真实 `codex app-server --stdio`，使用本地确定性 Responses 模型端点，验证中文输入被转换成英文进入模型、原生 v2 消息返回中文，以及显示与最终回复一致。随后关闭代理和后台，启动全新后台并 `thread/resume`：旧消息保持原生英文且不触发翻译，新消息继续双向翻译。还检查原生 rollout 未保存测试中文输入和中文译文，回合完成后临时字符数归零。测试后归档此次创建的合成会话。
 
-`npm run test:tui` 通过 Python PTY 启动真实 Codex TUI 和 app-server。输入“请测试翻译桥接。”，本地模型收到英文，TUI 显示“桥接已就绪。”，正常 `/quit` 返回状态 0。前后比较原生输入历史中的测试 prompt 数量，确认不会额外保存中文输入。随后在不同目录使用退出提示中的短命令重启恢复同一会话，确认沿用原工作目录，再验证 `resume --last`。
+`npm run test:tui` 通过 Python PTY 启动真实 Codex TUI 和 app-server，两个命令共用一个新建的隔离 `CODEX_HOME`，避免读取个人输入历史或受同时运行的用户会话影响。先用原生 Codex 提交英文 prompt，再启动代理，实际按 ↑ 取回它、按 ↓ 回到空输入框，再次按 ↑ 取回。随后输入“请测试翻译桥接。”，本地模型收到英文，TUI 显示“桥接已就绪。”，正常 `/quit` 返回状态 0。
 
-另外用原生 `codex` 创建并命名合成会话，在 `codex-zh` 内通过 `/resume` 搜索、选中该会话并继续中文对话；再用原生 `codex` 恢复代理创建的会话，验证双向共享历史。测试后归档此次创建的合成会话。各阶段记录在 `.test-state/tui/` 下的 `start/`、`resume-id/`、`resume-last/`、`native-start/`、`slash-resume/`、`native-resume-bridge/`。Codex 模型和 DeepSeek 端点都是本地模拟，不调用真实模型。
+测试还在新开的原生 Codex 输入框中用 ↑/↓ 取回代理保存的中文输入，检查共享 `history.jsonl` 中的中文 prompt 数量，并确认显式设置 `history.persistence="none"` 后文件不再新增内容。恢复会话的输入框会优先使用该会话的输入，因此全局输入历史与恢复会话分别验证。使用退出提示中的短命令从不同目录恢复同一会话，确认沿用原工作目录，同时覆盖 `resume --last`。
+
+另外用原生 `codex` 创建并命名合成会话，在 `codex-zh` 内通过 `/resume` 搜索、选中该会话并继续中文对话；再用原生 `codex` 恢复代理创建的会话，验证双向共享历史。测试后归档此次创建的合成会话。各阶段记录在 `.test-state/tui/` 下的 `start/`、`resume-id/`、`resume-last/`、`native-start/`、`slash-resume/`、`native-recall/`、`native-resume-bridge/`、`history-disabled/`。Codex 模型和 DeepSeek 端点都是本地模拟，不调用真实模型。
 
 ## 长对话内存检查
 
