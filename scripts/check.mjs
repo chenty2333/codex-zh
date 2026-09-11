@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const excluded = new Set(['node_modules', '.git', '.state', '.test-state', 'coverage']);
-let checked = 0;
+let checked = 0, pythonChecked = 0;
 async function walk(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     if (excluded.has(entry.name) || entry.name === '.env') continue;
@@ -15,6 +15,10 @@ async function walk(directory) {
         const result = spawnSync(process.execPath, ['--check', path], { encoding: 'utf8' });
         if (result.status !== 0) throw new Error(`Syntax check failed: ${path}`);
         checked++;
+      } else if (entry.name.endsWith('.py')) {
+        const result = spawnSync('python3', ['-c', 'import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())', path], { encoding: 'utf8' });
+        if (result.status !== 0) throw new Error(`Syntax check failed: ${path}`);
+        pythonChecked++;
       }
       const contents = await readFile(path, 'utf8');
       if (/\bsk-[A-Za-z0-9_-]{20,}\b/.test(contents)) throw new Error(`Possible API credential in project source: ${path}`);
@@ -22,4 +26,4 @@ async function walk(directory) {
   }
 }
 await walk(root);
-console.log(`Syntax checked ${checked} JavaScript modules; no API credentials detected in project source.`);
+console.log(`Syntax checked ${checked} JavaScript modules and ${pythonChecked} Python files; no API credentials detected in project source.`);

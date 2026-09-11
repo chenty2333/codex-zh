@@ -2,11 +2,13 @@
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../src/config.mjs';
 import { DeepSeek } from '../src/deepseek.mjs';
 import { Translator } from '../src/translator.mjs';
 import { startServer } from '../src/server.mjs';
 import { resumeCommand } from '../src/resume.mjs';
+import { ExitOutput } from '../src/exit-output.mjs';
 
 const HELP = `codex-zh — 原生 Codex TUI 的中英翻译代理
 
@@ -72,9 +74,17 @@ async function main() {
   const translator = new Translator(new DeepSeek(config), config);
   const server = await startServer({ config, translator, backendArgs, backendPrefix, cwd: backendCwd, log: text => console.error(`codex-zh: ${text}`) });
   const authEnv = 'CODEX_ZH_BRIDGE_TOKEN';
-  const child = spawn(config.codexBin, ['--remote', server.url, '--remote-auth-token-env', authEnv, ...native], {
-    stdio: 'inherit', env: { ...process.env, [authEnv]: server.token },
+  const args = ['--remote', server.url, '--remote-auth-token-env', authEnv, ...native];
+  const terminal = process.stdin.isTTY && process.stdout.isTTY;
+  const output = new ExitOutput(bytes => {
+    if (!process.stdout.write(bytes)) child.stdout?.pause();
+  }, { url: server.url, authEnv });
+  const child = spawn(terminal ? 'python3' : config.codexBin, terminal ? [fileURLToPath(new URL('../src/terminal.py', import.meta.url)), config.codexBin, ...args] : args, {
+    stdio: terminal ? ['inherit', 'pipe', 'inherit'] : 'inherit', env: { ...process.env, [authEnv]: server.token },
   });
+  child.stdout?.on('data', bytes => output.push(bytes));
+  const onDrain = () => child.stdout?.resume();
+  process.stdout.on('drain', onDrain);
   let childError = false;
   child.on('error', () => { childError = true; console.error('codex-zh: 无法启动原生 Codex。'); });
   const onTerm = () => child.kill('SIGTERM');
@@ -83,12 +93,13 @@ async function main() {
   const onInt = () => {};
   process.on('SIGTERM', onTerm); process.on('SIGINT', onInt);
   const { code, signal } = await new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
+  process.stdout.off('drain', onDrain);
+  output.end();
   process.off('SIGTERM', onTerm); process.off('SIGINT', onInt);
   await server.close();
-  if (!childError) {
-    console.error('codex-zh: 本地会话已关闭，未完成的后台工作也会停止；上方临时 ws 重连地址已失效。');
+  if (!childError && server.resumeSession) {
     const command = resumeCommand(server.resumeSession, { passthrough: config.passthrough, profileArgs: backendPrefix });
-    console.error(`codex-zh: ${server.resumeSession ? '恢复本次对话' : '选择历史对话'}：${command}`);
+    console.log(`To continue this session, run:\n  ${command}`);
   }
   process.exitCode = childError ? 1 : code ?? (signal === 'SIGINT' ? 130 : 1);
 }

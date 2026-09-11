@@ -16,6 +16,7 @@ import time
 
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 32, 120, 0, 0))
+original_terminal = termios.tcgetattr(slave)
 env = dict(os.environ, TERM='xterm-256color')
 process = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave, env=env,
                            start_new_session=True,
@@ -142,6 +143,15 @@ try:
                 drain_for(1)
         else:
             wait_for('桥接已就绪。')
+        if env.get('CODEX_ZH_TUI_TERMINAL_CHECKS') == '1':
+            start = len(capture)
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 38, 110, 0, 0))
+            os.killpg(process.pid, signal.SIGWINCH)
+            wait_for('gpt-5.1-codex-mini', start, compact=True)
+            type_text('discard this draft')
+            start = len(capture)
+            os.write(master, b'\x03')
+            wait_for('Ask Codex to do anything', start, compact=True)
         send_line('/quit')
         while time.monotonic() < deadline and read_output():
             pass
@@ -160,16 +170,17 @@ try:
     (directory / 'capture.log').write_bytes(capture)
     text = visible()
     original_visible = 'The bridge is ready.' in text
+    terminal_restored = termios.tcgetattr(master) == original_terminal
     report = {'nativeTuiFound': 'OpenAI Codex' in text, 'trustPromptHandled': trust_handled,
               'translatedReplyVisible': '桥接已就绪。' in text,
               'nativeEnglishReplyLeaked': original_visible and not allow_history,
               'originalHistoryVisible': original_visible and allow_history,
               'pickerOpened': picker_opened, 'workflowComplete': workflow_complete,
               'sharedPromptRecalled': history_recalled, 'emptyComposerRestoredWithDown': history_empty_restored,
-              'exitCode': process.returncode, 'error': error_message}
+              'terminalRestored': terminal_restored, 'exitCode': process.returncode, 'error': error_message}
     (directory / 'report.json').write_text(json.dumps(report, indent=2))
     print(json.dumps(report))
-    sys.exit(0 if workflow_complete and not report['nativeEnglishReplyLeaked'] and process.returncode == 0 else 1)
+    sys.exit(0 if workflow_complete and terminal_restored and not report['nativeEnglishReplyLeaked'] and process.returncode == 0 else 1)
 finally:
     os.close(master)
     if process.poll() is None:

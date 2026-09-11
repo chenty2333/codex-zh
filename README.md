@@ -1,6 +1,6 @@
 # codex-zh
 
-需要 Linux、Node.js 22+，以及已安装并登录的 Codex CLI（已验证版本：0.154.0）。
+需要 Linux、Node.js 22+、Python 3，以及已安装并登录的 Codex CLI（已验证版本：0.154.0）。
 
 ```sh
 git clone git@github.com:chenty2333/codex-zh.git

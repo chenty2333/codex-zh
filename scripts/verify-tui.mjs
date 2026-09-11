@@ -90,7 +90,7 @@ async function runTui(args, stage, { allowHistory = false, directNative = false,
   const prompt = pickerName || historyPrompt ? [] : [directNative ? 'Please test the translation bridge.' : '请测试翻译桥接。'];
   const child = spawn('python3', ['scripts/tui-driver.py', ...commandArgs, ...args, ...prompt], {
     cwd: project, stdio: ['ignore', 'inherit', 'inherit'],
-    env: { ...process.env, DEEPSEEK_API_KEY: 'test-credential', DEEPSEEK_BASE_URL: url, CODEX_ZH_TUI_REPORT_DIR: directory, CODEX_ZH_TUI_ALLOW_HISTORY: allowHistory ? '1' : '0', CODEX_ZH_TUI_NATIVE: directNative ? '1' : '0', CODEX_ZH_TUI_PICKER_NAME: pickerName || '', CODEX_ZH_TUI_FIXTURE_NAME: fixtureName || '', CODEX_ZH_TUI_HISTORY_PROMPT: historyPrompt || '' },
+    env: { ...process.env, DEEPSEEK_API_KEY: 'test-credential', DEEPSEEK_BASE_URL: url, CODEX_ZH_TUI_REPORT_DIR: directory, CODEX_ZH_TUI_ALLOW_HISTORY: allowHistory ? '1' : '0', CODEX_ZH_TUI_NATIVE: directNative ? '1' : '0', CODEX_ZH_TUI_PICKER_NAME: pickerName || '', CODEX_ZH_TUI_FIXTURE_NAME: fixtureName || '', CODEX_ZH_TUI_HISTORY_PROMPT: historyPrompt || '', CODEX_ZH_TUI_TERMINAL_CHECKS: stage === 'start' ? '1' : '0' },
   });
   const code = await new Promise(resolve => child.on('close', resolve));
   assert.equal(code, 0, `Native TUI ${stage} verification failed; inspect ${directory}/capture.log`);
@@ -100,7 +100,10 @@ async function runTui(args, stage, { allowHistory = false, directNative = false,
     assert.ok(sessionId, 'Native Codex must print a resumable session ID');
     return { sessionId };
   }
-  const command = capture.match(/codex-zh: 恢复本次对话：(codex-zh [^\r\n]+)/)?.[1];
+  const tail = capture.slice(-1800);
+  assert.doesNotMatch(tail, /Disconnected from this task|Reconnect: codex|Stop the current turn:|Token usage so far:|codex-zh: 本地会话已关闭|codex-zh: 恢复本次对话/);
+  assert.match(tail, /Token usage: total=[\d,]+ input=[\d,]+ output=[\d,]+\r?\nTo continue this session, run:\r?\n  codex-zh resume [0-9a-f-]{36}\r?\n$/);
+  const command = capture.match(/To continue this session, run:\r?\n  (codex-zh [^\r\n]+)/)?.[1];
   assert.ok(command, 'The launcher must print a specific reusable resume command after shutdown');
   const argv = JSON.parse(execFileSync('python3', ['-c', 'import json,shlex,sys; print(json.dumps(shlex.split(sys.argv[1])))', command], { encoding: 'utf8' }));
   assert.equal(argv[0], 'codex-zh');
